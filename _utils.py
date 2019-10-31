@@ -7,6 +7,15 @@ import torch
 
 class BalancedPositiveNegativeSampler(object):
     """
+    DEREK'S COMMENT
+    
+    The basic concept here is that not every predicted anchor box is used for
+    training at each step, rather, a subset of positive and negative examples 
+    (balanced so the network doesn't learn a proportion) are selected
+    """
+    
+    
+    """
     This class samples batches, ensuring that they contain a fixed proportion of positives
     """
 
@@ -70,7 +79,8 @@ class BalancedPositiveNegativeSampler(object):
 
         return pos_idx, neg_idx
 
-
+## this line means that the function will be precompiled as a ScriptModeule or bit of C
+## code so it executes faster - not all python operations are available in TorchScript though
 @torch.jit.script
 def encode_boxes(reference_boxes, proposals, weights):
     # type: (torch.Tensor, torch.Tensor, torch.Tensor) -> torch.Tensor
@@ -120,6 +130,16 @@ def encode_boxes(reference_boxes, proposals, weights):
 
 
 class BoxCoder(object):
+    """
+    DEREK'S COMMENT
+    
+    BoxCoder takes in region proposals of the form minx,miny,maxx,maxy and converts
+    them to x,y,w,h relative to reference boxes (anchor box proposals I think). 
+    x,y,w andh are divided by weights so that the range is approximately the same
+    for each variable I'm guessing
+    """
+    
+    
     """
     This class encodes and decodes a set of bounding boxes into
     the representation used for training the regressors.
@@ -215,6 +235,16 @@ class BoxCoder(object):
 
 
 class Matcher(object):
+    
+    """
+    DEREK'S COMMENT 
+    This one is pretty straightforward - based on some similarity matrix with an
+    entry for each pred and ground truth combo, select the most similar gt for 
+    each pred as long as they have at least some cutoff of similarity. If 
+    allow_low_quality_matches, then the best gt match for each pred is selected
+    even if bad
+    """
+    
     """
     This class assigns to each predicted "element" (e.g., a box) a ground-truth
     element. Each predicted element will have exactly zero or one matches; each

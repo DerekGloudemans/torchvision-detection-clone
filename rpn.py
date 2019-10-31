@@ -35,6 +35,7 @@ class AnchorGenerator(nn.Module):
     ):
         super(AnchorGenerator, self).__init__()
 
+        ## This chunk makes sure / adjusts lengths of aspect_ratios and sizes to be equal
         if not isinstance(sizes[0], (list, tuple)):
             # TODO change this
             sizes = tuple((s,) for s in sizes)
@@ -50,18 +51,31 @@ class AnchorGenerator(nn.Module):
 
     @staticmethod
     def generate_anchors(scales, aspect_ratios, device="cpu"):
+        """
+        Given a set of scales and aspect ratios, returns a set of anchor boxes
+        defined by minx, miny, maxx, maxy. Note that these anchors are relative 
+        to 0, so must be shifted later
+        """
         scales = torch.as_tensor(scales, dtype=torch.float32, device=device)
         aspect_ratios = torch.as_tensor(aspect_ratios, dtype=torch.float32, device=device)
         h_ratios = torch.sqrt(aspect_ratios)
         w_ratios = 1 / h_ratios
-
+        
         ws = (w_ratios[:, None] * scales[None, :]).view(-1)
         hs = (h_ratios[:, None] * scales[None, :]).view(-1)
-
+        ## theoretically, h_ratios and w_ratios are now 1D tensors each - the exact method
+        ## for generating the anchor boxes from scale and aspect aren't super important
+        
+        # creates boxes (minx, miny,maxx,maxy) and rounds to pixel integer
         base_anchors = torch.stack([-ws, -hs, ws, hs], dim=1) / 2
         return base_anchors.round()
 
     def set_cell_anchors(self, device):
+        """
+        Sets self.cell_anchors by calling generate anchors if self.cell_anchors
+        is not already set. Essentially, the rpn should have a list of the anchor
+        boxes prestored so it only has to compute it once
+        """
         if self.cell_anchors is not None:
             return self.cell_anchors
         cell_anchors = [
@@ -70,32 +84,45 @@ class AnchorGenerator(nn.Module):
                 aspect_ratios,
                 device
             )
+            # args are zipped so they are in paired tuples
             for sizes, aspect_ratios in zip(self.sizes, self.aspect_ratios)
         ]
         self.cell_anchors = cell_anchors
 
     def num_anchors_per_location(self):
+        """
+        simple utility function - num anchors per location is sizes * aspect ratios
+        """
         return [len(s) * len(a) for s, a in zip(self.sizes, self.aspect_ratios)]
 
     def grid_anchors(self, grid_sizes, strides):
         anchors = []
+        ## I'm a bit fuzzy on how the zip works with items of various dimensions
+        ## so we'll have to run this and see
         for size, stride, base_anchors in zip(
             grid_sizes, strides, self.cell_anchors
         ):
             grid_height, grid_width = size
             stride_height, stride_width = stride
             device = base_anchors.device
+            ## generates a grid of values by which to shift x and y, respectively
+            ## based on grid stride and size
             shifts_x = torch.arange(
                 0, grid_width, dtype=torch.float32, device=device
             ) * stride_width
             shifts_y = torch.arange(
                 0, grid_height, dtype=torch.float32, device=device
             ) * stride_height
+                    
+            ## assemble these shift values into a single tensor
+            ## I think theoretically this can be multiplied with some matrix operation by
+            ## tensor of anchor boxes to shift nicely.
             shift_y, shift_x = torch.meshgrid(shifts_y, shifts_x)
             shift_x = shift_x.reshape(-1)
             shift_y = shift_y.reshape(-1)
             shifts = torch.stack((shift_x, shift_y, shift_x, shift_y), dim=1)
 
+            ## and here, for the self.cell_anchors are shifted
             anchors.append(
                 (shifts.view(-1, 1, 4) + base_anchors.view(1, -1, 4)).reshape(-1, 4)
             )
@@ -103,14 +130,29 @@ class AnchorGenerator(nn.Module):
         return anchors
 
     def cached_grid_anchors(self, grid_sizes, strides):
+        """
+        For a given grid size and stride, cache the resulting "array" of shifted
+        anchor boxes so that they only have to be shifted once and can then on 
+        be simply accessed. Cache here just means they're stored in a dictionary
+        in the AnchorGenerator Object
+        """
+        
+        ## if already in cache
         key = tuple(grid_sizes) + tuple(strides)
         if key in self._cache:
             return self._cache[key]
+        ## if not in cache
         anchors = self.grid_anchors(grid_sizes, strides)
         self._cache[key] = anchors
         return anchors
 
     def forward(self, image_list, feature_maps):
+        """
+        I'll have to dive into this one as well, but essentially it looks like the 
+        size of the feature maps output by the backbone (presumably) are used to 
+        define the grid size and stride, and then anchor boxes are created and returned
+        for each image in the image_list
+        """
         grid_sizes = tuple([feature_map.shape[-2:] for feature_map in feature_maps])
         image_size = image_list.tensors.shape[-2:]
         strides = tuple((image_size[0] / g[0], image_size[1] / g[1]) for g in grid_sizes)
@@ -137,6 +179,11 @@ class RPNHead(nn.Module):
 
     def __init__(self, in_channels, num_anchors):
         super(RPNHead, self).__init__()
+        
+        ## interestingy, this head is fully convolutional it seems as 2D conv layers
+        ## are directly output as cls_logits and bbox preds for each anchor box
+        ## these outputs are objectness and bbox preds, which will be used in loss
+        ## function to train the Region Proposal Network to generate high-quality proposals
         self.conv = nn.Conv2d(
             in_channels, in_channels, kernel_size=3, stride=1, padding=1
         )
@@ -145,6 +192,7 @@ class RPNHead(nn.Module):
             in_channels, num_anchors * 4, kernel_size=1, stride=1
         )
 
+        ## initialize weights of RPN head with normal random distribution
         for l in self.children():
             torch.nn.init.normal_(l.weight, std=0.01)
             torch.nn.init.constant_(l.bias, 0)
@@ -154,11 +202,16 @@ class RPNHead(nn.Module):
         bbox_reg = []
         for feature in x:
             t = F.relu(self.conv(feature))
+            ## pass conv features to each head and return results
             logits.append(self.cls_logits(t))
             bbox_reg.append(self.bbox_pred(t))
         return logits, bbox_reg
 
 
+"""
+Can't say for sure what these ones do other than adjusting dimensions so output 
+is in a more desirable shapes
+"""
 def permute_and_flatten(layer, N, A, C, H, W):
     layer = layer.view(N, -1, C, H, W)
     layer = layer.permute(0, 3, 4, 1, 2)
@@ -199,6 +252,17 @@ def concat_box_prediction_layers(box_cls, box_regression):
 
 class RegionProposalNetwork(torch.nn.Module):
     """
+    DEREK'S COMMENT:
+        So here's the basic summary. The anchor generator exhaustively generates
+        anchors at a regular grid and stride for each feature map (I guess the idea
+        here is that objects can be found in each feature map independently).
+        Then, the RPN head predicts objectness and regresses a likely object 
+        bounding box location. These values are used 1. to perform nms and other 
+        pruning to reduce the number of ROIs that must be looked at, and 2. are 
+        used to train the RPN head to make more accurate predictions (tune the conv
+        weights based on the data such that the output values facilitate high-
+        quality region proposals being kept)
+        
     Implements Region Proposal Network (RPN).
 
     Arguments:
@@ -232,28 +296,37 @@ class RegionProposalNetwork(torch.nn.Module):
                  #
                  pre_nms_top_n, post_nms_top_n, nms_thresh):
         super(RegionProposalNetwork, self).__init__()
+        ## generates dummy anchor boxes
         self.anchor_generator = anchor_generator
+        ## refines and computes objectness for each anchor box
         self.head = head
+        ## encodes anchor boxes into a different form (x,y,w,h I think)
         self.box_coder = det_utils.BoxCoder(weights=(1.0, 1.0, 1.0, 1.0))
 
         # used during training
         self.box_similarity = box_ops.box_iou
 
+        ## used to match predicted region proposals to ground truth ROIs
         self.proposal_matcher = det_utils.Matcher(
             fg_iou_thresh,
             bg_iou_thresh,
             allow_low_quality_matches=True,
         )
 
+        ## used to select a subset of region proposals for training I think
+        ## essentially returns a positive and negative mask, where not all elements 
+        ## are included in one or the other probably
         self.fg_bg_sampler = det_utils.BalancedPositiveNegativeSampler(
             batch_size_per_image, positive_fraction
         )
+        
         # used during testing
         self._pre_nms_top_n = pre_nms_top_n
         self._post_nms_top_n = post_nms_top_n
         self.nms_thresh = nms_thresh
         self.min_size = 1e-3
 
+    # Convenient getters for object property
     @property
     def pre_nms_top_n(self):
         if self.training:
@@ -266,17 +339,36 @@ class RegionProposalNetwork(torch.nn.Module):
             return self._post_nms_top_n['training']
         return self._post_nms_top_n['testing']
 
+    
     def assign_targets_to_anchors(self, anchors, targets):
+        """
+        DEREK'S COMMENT
+        Essentially a wrapper function for the matcher object defined above
+        - Generates match quality matric using self.box_similarity (iou defined in box_ops)
+        - Generates matchings
+        - Discards matched_objects where IOU is between max for negative and min
+          for positive as defined in object properties
+        - Returns labels and their corresponding matched_gt_boxes such that 
+          label[i] and matched_gt_box[i] are the label (-1,0,or 1) and box (4 coords)
+          corresponding to anchor proposal i
+        """
         labels = []
         matched_gt_boxes = []
         for anchors_per_image, targets_per_image in zip(anchors, targets):
+            
+            ## get the correct, ground_truth bboxes
             gt_boxes = targets_per_image["boxes"]
+            
+            ## compare each gt_box to each anchor box proposal and match
             match_quality_matrix = self.box_similarity(gt_boxes, anchors_per_image)
             matched_idxs = self.proposal_matcher(match_quality_matrix)
+            
             # get the targets corresponding GT for each proposal
             # NB: need to clamp the indices because we can have a single
             # GT in the image, and matched_idxs can be -2, which goes
             # out of bounds
+            
+            ## select the matched boxes
             matched_gt_boxes_per_image = gt_boxes[matched_idxs.clamp(min=0)]
 
             labels_per_image = matched_idxs >= 0
@@ -294,7 +386,12 @@ class RegionProposalNetwork(torch.nn.Module):
             matched_gt_boxes.append(matched_gt_boxes_per_image)
         return labels, matched_gt_boxes
 
+
     def _get_top_n_idx(self, objectness, num_anchors_per_level):
+        """
+        DEREK - Returns the indices of the top n proposals (according to the 
+        objectness score output by the roi head)
+        """
         r = []
         offset = 0
         for ob in objectness.split(num_anchors_per_level, 1):
@@ -354,6 +451,7 @@ class RegionProposalNetwork(torch.nn.Module):
             box_loss (Tensor
         """
 
+        # get masks and select relevant elements for positive and negatives
         sampled_pos_inds, sampled_neg_inds = self.fg_bg_sampler(labels)
         sampled_pos_inds = torch.nonzero(torch.cat(sampled_pos_inds, dim=0)).squeeze(1)
         sampled_neg_inds = torch.nonzero(torch.cat(sampled_neg_inds, dim=0)).squeeze(1)
@@ -365,12 +463,14 @@ class RegionProposalNetwork(torch.nn.Module):
         labels = torch.cat(labels, dim=0)
         regression_targets = torch.cat(regression_targets, dim=0)
 
+        # F1 loss on box parameters (not IOU loss)
         box_loss = F.l1_loss(
             pred_bbox_deltas[sampled_pos_inds],
             regression_targets[sampled_pos_inds],
             reduction="sum",
         ) / (sampled_inds.numel())
 
+        # BCE loss on objectness predictions
         objectness_loss = F.binary_cross_entropy_with_logits(
             objectness[sampled_inds], labels[sampled_inds]
         )
@@ -406,14 +506,20 @@ class RegionProposalNetwork(torch.nn.Module):
         # apply pred_bbox_deltas to anchors to obtain the decoded proposals
         # note that we detach the deltas because Faster R-CNN do not backprop through
         # the proposals
+        ## essentially, apply the relative shift from each anchor box to get absolute proposal
         proposals = self.box_coder.decode(pred_bbox_deltas.detach(), anchors)
         proposals = proposals.view(num_images, -1, 4)
+        
+        # filter by min_nms, min_size, clip boxes, etc.
         boxes, scores = self.filter_proposals(proposals, objectness, images.image_sizes, num_anchors_per_level)
 
         losses = {}
         if self.training:
+            # get closest gt box for each proposal
             labels, matched_gt_boxes = self.assign_targets_to_anchors(anchors, targets)
+            # encode gt_boxes into relative space 
             regression_targets = self.box_coder.encode(matched_gt_boxes, anchors)
+            # compute loss
             loss_objectness, loss_rpn_box_reg = self.compute_loss(
                 objectness, pred_bbox_deltas, labels, regression_targets)
             losses = {
