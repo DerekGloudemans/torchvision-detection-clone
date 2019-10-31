@@ -12,6 +12,9 @@ from . import _utils as det_utils
 
 def fastrcnn_loss(class_logits, box_regression, labels, regression_targets):
     """
+    DEREK'S COMMENT - pretty straightforward: cross entropy loss on labels and 
+        smooth L1 loss on box parameters
+    
     Computes the loss for Faster R-CNN.
 
     Arguments:

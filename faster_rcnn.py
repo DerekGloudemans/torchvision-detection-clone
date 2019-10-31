@@ -177,6 +177,7 @@ class FasterRCNN(GeneralizedRCNN):
 
         out_channels = backbone.out_channels
 
+        ## Anchor generator and RPN head are both passed to region proposal network
         if rpn_anchor_generator is None:
             anchor_sizes = ((32,), (64,), (128,), (256,), (512,))
             aspect_ratios = ((0.5, 1.0, 2.0),) * len(anchor_sizes)
@@ -197,6 +198,8 @@ class FasterRCNN(GeneralizedRCNN):
             rpn_batch_size_per_image, rpn_positive_fraction,
             rpn_pre_nms_top_n, rpn_post_nms_top_n, rpn_nms_thresh)
 
+        ## The next three nn.Modules (ROI align, shared linear features and predictors)
+        ## are all passed to the ROIHeads and evaluated in that single object
         if box_roi_pool is None:
             box_roi_pool = MultiScaleRoIAlign(
                 featmap_names=[0, 1, 2, 3],
@@ -224,6 +227,9 @@ class FasterRCNN(GeneralizedRCNN):
             bbox_reg_weights,
             box_score_thresh, box_nms_thresh, box_detections_per_img)
 
+        ## define transform, which is a pretty standard pytorch transform
+        ## plus batching of images by padding to same size and resizing of boxes
+        ## in postprocessing step
         if image_mean is None:
             image_mean = [0.485, 0.456, 0.406]
         if image_std is None:
@@ -287,7 +293,7 @@ model_urls = {
         'https://download.pytorch.org/models/fasterrcnn_resnet50_fpn_coco-258fb6c6.pth',
 }
 
-
+## Constructs an instance of Faster_RCNN with resnet backbone and fpn feature map extractor
 def fasterrcnn_resnet50_fpn(pretrained=False, progress=True,
                             num_classes=91, pretrained_backbone=True, **kwargs):
     """

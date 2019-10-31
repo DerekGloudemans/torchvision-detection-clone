@@ -9,6 +9,19 @@ from .. import resnet
 
 class BackboneWithFPN(nn.Sequential):
     """
+    
+    DEREK'S COMMENT - a feature pyramid network creates several feature maps 
+    that get progressively coarser, eliminating the need for multiple scales of
+    anchor boxes on a given level (single feature map)
+    (since the different feature maps are at different scales)
+    
+    This idea was published in a separate paper a year or two after Faster RCNN
+    and claimed improved results over the single feature map method used originally
+    """
+    
+    """
+    
+    
     Adds a FPN on top of a model.
 
     Internally, it uses torchvision.models._utils.IntermediateLayerGetter to
@@ -40,6 +53,7 @@ class BackboneWithFPN(nn.Sequential):
         self.out_channels = out_channels
 
 
+## Constructs a ResNet-based FPN
 def resnet_fpn_backbone(backbone_name, pretrained):
     backbone = resnet.__dict__[backbone_name](
         pretrained=pretrained,
